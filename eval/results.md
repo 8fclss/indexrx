@@ -6,8 +6,8 @@ Measurement table. Time is cold/warm, ms. Buffers — shared hit+read.
 |---|---------|-----------------------|----------|----------------------|------------|
 | 01 | Last 20 orders of one user within 90 days (filter + `ORDER BY` + `LIMIT`): Parallel Seq Scan + Sort reads the whole table to return 20 rows | 174 / 29 ms; 18624 | `CREATE INDEX ON orders (user_id, created_at DESC);` Index Scan, no Sort or Gather | 0.33 / 0.05 ms; 26 | 60 MB |
 | 02 | Rare status (`pending`, 0.5% of rows): Parallel Seq Scan reads the whole table to return ~10k rows | 32 / 29 ms; 18510 | `CREATE INDEX orders_pending_idx ON orders (id) INCLUDE (user_id, total) WHERE status = 'pending';` + `VACUUM orders;` Index Only Scan | 0.89 / 0.75 ms; 52 | 416 kB |
-| 03 | | | | | |
-| 04 | | | | | |
+| 03 | Case-insensitive search by `lower(email)`: Parallel Seq Scan (1 worker) reads the whole table to return 1 row | 33 / 20 ms; 1860 | `CREATE INDEX users_email_lower_idx ON users (lower(email));` + `ANALYZE users;` Index Scan | 0.038 / 0.030 ms; 4 | 7960 kB |
+| 04 | Substring search with a leading wildcard (`LIKE '%9999@%'`): Seq Scan reads the whole table to return 20 rows | 13 / 10 ms; 1860 | `CREATE EXTENSION pg_trgm;` `CREATE INDEX users_email_trgm_idx ON users USING gin (email gin_trgm_ops);` Bitmap Heap Scan over Bitmap Index Scan | 0.44 / 0.43 ms; 206 | 6976 kB |
 | 05 | | | | | |
 | 06 | | | | | |
 
@@ -35,3 +35,15 @@ Hypotheses written before the runs and adjusted after the measurements.
         - Time reduction has a ceiling: returning 10k rows still costs ~0.5 ms, so in the end buffers show the win more honestly (18510 -> 52, ~350x) than time (29 -> 0.75 ms, ~40x).
         - The estimate was good (`rows=9733` vs 10061 actual) because all four statuses are in the most common values (MCV) list.
     - **Not tested:** what `Index Only Scan` does with a stale visibility map (`VACUUM` was run before the first measurement), and the full index on `status`.
+- **03 (mostly confirmed, `ANALYZE` was unexpected):** My hypothesis was a `Seq Scan` (probably without workers) and something like 30-40 ms before; an index on the expression `lower(email)` because a index on `email` would just not fit the query; after it an `Index Scan` with under 10 buffers and under 1 ms; an index of a few MB, smaller than the table; and no need for `ANALYZE`, because the planner would see that only one row matches.
+    - **Right:** the expression index, `Index Scan`, 4 buffers instead of 1860, ~0.03 ms instead of 20–33 ms, and the index (7960 kB) is smaller than the table (1860 pages = ~14.5 MB).
+    - **Detail I got wrong:** the seq scan is `Parallel` with 1 worker, not a `Seq Scan`. I guess the table is just big enough for the planner to use a worker.
+    - **Wrong:** `ANALYZE` matters. Right after `CREATE INDEX` the planner still estimated `rows=1000` and chose `Bitmap Heap Scan` (cost 1657). After `ANALYZE users` the estimate became `rows=1` and the plan became `Index Scan` (cost 8.44). Without statistics on `lower(email)` the planner has no base to estimate on and it uses default guess of 0.5% of the table (1000 rows of 200k); `ANALYZE` is what collects statistics on the indexed expression.
+    - In this query the wrong estimate costed nothing: the bitmap plan read the same 4 buffers and took 0.056 ms against 0.038 ms. It would probably matter more when this query is a part of some bigger one (a join, for example) where the row estimate drives the choice of the join method.
+    - **Plain index on `email`:** not used, the plan stayed `Parallel Seq Scan` with exactly the same cost (4724.71) and 1860 buffers. The planner does not know that `lower(email)` is related to `email` so the indexed expression has to match the one in the query.
+- **04 (mostly confirmed, size was unexpected):** My hypothesis was a `Seq Scan` and 10–20 ms before, because a B-tree cannot search for a substring; a GIN index with `pg_trgm`; after it a `Bitmap Heap Scan` over a `Bitmap Index Scan` with buffers dropping to tens and a time of ~1 ms; an index around the size of the table or larger; and I did not know whether the planner would use the index on such a small table.
+    - **Right:** `Seq Scan` with 1860 buffers and 10–13 ms; the `pg_trgm` GIN index; the `Bitmap Heap Scan` plan; and the planner does use the index even on a table this small (cost 99.75 against 4360 for the seq scan).
+    - **Plain index on `email`:** not used, the plan stayed a `Seq Scan` with the same cost (4360) and 1860 buffers. A B-tree is sorted from the first character, so it cannot help when the pattern starts with `%`.
+    - **Buffers were hundreds, not tens:** 206 instead of 1860 (9x), of which 200 are table pages and 6 are index pages. Time went from 10 ms to 0.43 ms (~24x warm), inside my 10–100x guess.
+    - **Why 200 table pages for 20 rows:** the index returned 200 candidate rows (`rows=200` in the `Bitmap Index Scan`) and the recheck threw away 180 (`Rows Removed by Index Recheck: 180`). A trigram index only knows that an email contains the trigrams `999` and `99@`, not that they form `9999@` together. So it also returned the 180 ids that end in `999` but not in `9999`, and each candidate sits on its own table page.
+    - **Wrong about the size:** the index (6976 kB) is smaller than the table (15 MB), about 46% of it not equal or larger.
