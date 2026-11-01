@@ -2,6 +2,7 @@ CREATE TABLE users (
     id          bigint PRIMARY KEY,
     email       text        NOT NULL,
     country     text        NOT NULL,
+    city        text        NOT NULL,
     created_at  timestamptz NOT NULL
 );
 

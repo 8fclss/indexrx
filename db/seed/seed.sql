@@ -3,13 +3,18 @@
 TRUNCATE users, orders, order_items, events;
 
 -- Users: 200 000
-INSERT INTO users (id, email, country, created_at)
+INSERT INTO users (id, email, country, city, created_at)
 SELECT
     g,
     'user' || g || '@example.com',
-    (ARRAY['US','DE','FR','GB','IN','BR','JP','RU','CN','CA'])[1 + floor(random() * 10)::int],
+    c,
+    c || '-' || (1 + floor(random() * 10)::int),
     now() - (random() * interval '1000 days')
-FROM generate_series(1, 200000) AS g;
+FROM (
+    SELECT g,
+           (ARRAY['US','DE','FR','GB','IN','BR','JP','RU','CN','CA'])[1 + floor(random() * 10)::int] AS c
+    FROM generate_series(1, 200000) AS g
+) s;
 
 -- Orders: 2 000 000, random()^3 -> lower id = more orders
 -- 90% completed, 0.5% pending
