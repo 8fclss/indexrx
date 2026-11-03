@@ -1,0 +1,291 @@
+# Reference answers for the agent eval (cases 01-12).
+# Source of truth for the numbers: eval/results.md (measured on the Docker stand).
+#
+# Paths are relative to eval/.
+#
+# Fields
+#   case                   query (.sql) or task description (.md) given to the agent
+#   setup / teardown       SQL to run before / after the case (cases 08-10)
+#   workload               queries to run after setup, before asking the agent (case 10)
+#   answer_type            expected verdict class:
+#                            create_index | extended_statistics | analyze | drop_index |
+#                            drop_index_with_caveats | no_action | work_mem
+#   acceptable             answers that count as correct (any of them)
+#   best                   the strongest answer(s); a subset of acceptable
+#   suboptimal             works, but clearly worse; scored as partial
+#   unacceptable           wrong or harmful answers; scored as fail
+#   required_followup      extra steps a correct answer must mention (ANALYZE, VACUUM, extension)
+#   required_diagnosis     diagnosis codes the explanation must contain (vocabulary below)
+#   required_caveats       caveats a correct answer must state (drop/settings cases)
+#   must_keep              objects the agent must NOT propose to drop
+#   false_positive_if      answer types that are counted as a false positive for this case
+#   verifiable_with_hypopg true / false / partial: can the verdict be checked with a
+#                          hypothetical index (GIN/GiST are not supported by HypoPG)
+#   reference              measured numbers (buffers, ms warm) for scoring "how much better"
+#
+# Diagnosis codes
+#   seq_scan_on_large_table   whole large table read for a small result
+#   rare_value                filter on a rare value (small share of rows)
+#   sort_with_limit           explicit Sort under LIMIT that an index order could remove
+#   function_on_column        expression in WHERE does not match a plain index
+#   leading_wildcard          LIKE '%...' cannot use a B-tree
+#   jsonb_containment         @> on jsonb needs GIN
+#   join_without_index        join key without an index, hash join over full scans
+#   row_estimate_mismatch     rows= differs from actual rows= by ~10x or more
+#   correlated_columns        planner multiplies selectivities of dependent columns
+#   stale_statistics          n_mod_since_analyze / reltuples show statistics older than the data
+#   duplicate_index           same columns, opclasses, expressions and predicate
+#   prefix_index              index columns are a left prefix of another index
+#   partial_index_not_duplicate  same columns but different WHERE predicate
+#   unused_index              idx_scan = 0 over the observation period
+#   large_share_of_rows       query returns a large share of the table (index does not pay off)
+#   random_heap_order         correlation ~0: index order means random heap access
+#   sort_spill                Sort Method: external merge, temp written > 0
+
+- id: "01"
+  case: cases/01_composite_order.sql
+  answer_type: create_index
+  acceptable:
+    - "orders (user_id, created_at DESC)"
+    - "orders (user_id, created_at)"          # read backwards, same plan and size
+  best:
+    - "orders (user_id, created_at DESC)"
+    - "orders (user_id, created_at)"
+  suboptimal:
+    - "orders (user_id)"                      # Bitmap Heap Scan + top-N Sort, ~10x slower than composite
+    - "orders (created_at, user_id)"          # range column first: 13x more buffers
+  unacceptable:
+    - "orders (created_at)"
+  required_diagnosis: ["seq_scan_on_large_table", "sort_with_limit"]
+  verifiable_with_hypopg: true
+  reference:
+    before: {buffers: 18624, ms: 29}
+    after:  {buffers: 26, ms: 0.05, index_size: "60 MB"}
+
+- id: "02"
+  case: cases/02_partial_index.sql
+  answer_type: create_index
+  acceptable:
+    - "partial index on orders WHERE status = 'pending'"   # any variant: with INCLUDE or without
+  best:
+    - "orders (id) INCLUDE (user_id, total) WHERE status = 'pending'"
+  suboptimal:
+    - "orders (status) WHERE status = 'pending'"           # Index Scan, 7730 buffers instead of 52
+  unacceptable:
+    - "full index on orders (status)"                      # works, but 13 MB instead of kilobytes
+  required_followup: ["VACUUM orders"]                     # only for the covering variant (Index Only Scan)
+  required_diagnosis: ["seq_scan_on_large_table", "rare_value"]
+  verifiable_with_hypopg: true                             # same plan, cost +51% for the covering index
+  reference:
+    before: {buffers: 18510, ms: 29}
+    after:  {buffers: 52, ms: 0.75, index_size: "416 kB"}
+
+- id: "03"
+  case: cases/03_function_on_column.sql
+  answer_type: create_index
+  acceptable:
+    - "users (lower(email))"
+    - "users USING hash (lower(email))"
+  best:
+    - "users (lower(email))"
+  unacceptable:
+    - "users (email)"                         # not used: the expression must match the query
+  required_followup: ["ANALYZE users"]        # without it rows=1000 and Bitmap Heap Scan
+  required_diagnosis: ["seq_scan_on_large_table", "function_on_column"]
+  verifiable_with_hypopg: partial             # no statistics on the expression: shows the pre-ANALYZE plan
+  reference:
+    before: {buffers: 1860, ms: 20}
+    after:  {buffers: 4, ms: 0.030, index_size: "7960 kB"}
+
+- id: "04"
+  case: cases/04_infix_like.sql
+  answer_type: create_index
+  acceptable:
+    - "users USING gin (email gin_trgm_ops)"
+    - "users USING gist (email gist_trgm_ops)"   # not measured, GiST also supports LIKE with pg_trgm
+  best:
+    - "users USING gin (email gin_trgm_ops)"
+  unacceptable:
+    - "users (email)"                         # B-tree cannot serve a leading '%'
+    - "users (email text_pattern_ops)"
+  required_followup: ["CREATE EXTENSION pg_trgm"]
+  required_diagnosis: ["seq_scan_on_large_table", "leading_wildcard"]
+  verifiable_with_hypopg: false               # GIN/GiST are not supported, verdict "not verified"
+  reference:
+    before: {buffers: 1860, ms: 10}
+    after:  {buffers: 206, ms: 0.43, index_size: "6976 kB"}
+
+- id: "05"
+  case: cases/05_jsonb_contains.sql
+  answer_type: create_index
+  acceptable:
+    - "events USING gin (payload)"
+    - "events USING gin (payload jsonb_path_ops)"
+  best:
+    - "events USING gin (payload jsonb_path_ops)"   # 4 index pages instead of 794, 14 MB vs 24 MB; only @>, @?, @@
+  unacceptable:
+    - "events (payload)"                      # B-tree on jsonb does not support @>
+    - "events ((payload->>'page'))"           # the query uses @>, not ->>
+  required_diagnosis: ["seq_scan_on_large_table", "jsonb_containment"]
+  verifiable_with_hypopg: false               # GIN is not supported, verdict "not verified"
+  reference:
+    before: {buffers: 43603, ms: 136}
+    after:  {buffers: 3732, ms: 8.3, index_size: "24 MB"}
+
+- id: "06"
+  case: cases/06_join_no_index.sql
+  answer_type: create_index
+  acceptable:
+    - "orders (user_id) + order_items (order_id)"
+  best:
+    - "orders (user_id) + order_items (order_id)"
+  suboptimal:
+    - "order_items (order_id) only"           # 29 ms: orders is still read in full
+    - "orders (user_id) only"                 # 110 ms: order_items is still read in full
+  required_diagnosis: ["join_without_index", "seq_scan_on_large_table"]
+  verifiable_with_hypopg: true
+  reference:
+    before: {buffers: 48118, ms: 140}
+    after:  {buffers: 5966, ms: 3.9, index_size: "18 MB + 64 MB"}
+
+- id: "07"
+  case: cases/07_correlated_columns.sql
+  answer_type: extended_statistics
+  acceptable:
+    - "CREATE STATISTICS (dependencies) ON country, city FROM users + ANALYZE users"
+    - "CREATE STATISTICS (mcv) ON country, city FROM users + ANALYZE users"
+    - "CREATE STATISTICS (dependencies, mcv) ON country, city FROM users + ANALYZE users"
+  best:
+    - "CREATE STATISTICS (mcv) ON country, city FROM users + ANALYZE users"   # also correct for impossible pairs and IN lists
+  unacceptable:
+    - "users (country, city) as the fix for the estimate"   # index is used, but rows=197 stays wrong
+    - "CREATE STATISTICS (ndistinct) only"                  # fixes GROUP BY, not WHERE
+  required_followup: ["ANALYZE users"]
+  required_diagnosis: ["row_estimate_mismatch", "correlated_columns"]
+  # orders (user_id) speeds the query up (67 -> 9 ms) but is a separate finding:
+  # not wrong to mention, but it is not the answer to the misestimate.
+  side_findings_ok: ["orders (user_id)"]
+  verifiable_with_hypopg: false               # not an index question
+  reference:
+    estimate_before: 217
+    estimate_after: 2160                      # dependencies; mcv gives 1893
+    actual: 2006
+    plan_changes: false                       # same plan with both estimates on this data
+
+- id: "08"
+  case: cases/08_stale_statistics.sql
+  setup: setup/08_up.sql
+  teardown: setup/08_down.sql
+  answer_type: analyze
+  acceptable:
+    - "ANALYZE orders"
+    - "VACUUM ANALYZE orders"
+  best:
+    - "ANALYZE orders"
+  unacceptable:
+    - "VACUUM orders"                         # does not update the statistics
+    - "VACUUM FULL orders"
+  false_positive_if: ["create_index"]         # orders (created_at) already exists
+  required_diagnosis: ["stale_statistics", "row_estimate_mismatch"]
+  # Expected evidence: rows=7893 vs ~400k actual; n_mod_since_analyze = 500000;
+  # reltuples = 2M while the table has 2.5M rows; last_analyze before the load.
+  verifiable_with_hypopg: false
+  reference:
+    estimate_before: 7893
+    estimate_after: 398931
+    actual: 399756
+    before: {buffers: 5978, ms: 51}
+    after:  {buffers: 5978, ms: 28}           # plan only became parallel
+
+- id: "09"
+  case: cases/09_duplicate_indexes.md
+  setup: setup/09_up.sql
+  teardown: setup/09_down.sql
+  answer_type: drop_index
+  acceptable:
+    - "DROP INDEX orders_user_id_idx2"                        # exact duplicate (or drop orders_user_id_idx instead, one of the pair)
+    - "DROP INDEX orders_user_id_idx2, orders_user_id_idx"    # also the left prefix of orders_user_created_idx
+  best:
+    - "DROP INDEX orders_user_id_idx2, orders_user_id_idx"
+  unacceptable:
+    - "DROP INDEX orders_user_pending_idx"    # partial: different predicate, not a duplicate
+    - "DROP INDEX orders_status_idx"          # unrelated column
+    - "DROP INDEX orders_pkey"
+    - "DROP INDEX orders_user_created_idx"    # keep the wider index, drop the prefix
+  must_keep: ["orders_pkey", "orders_user_pending_idx", "orders_status_idx", "orders_user_created_idx"]
+  required_caveats:
+    - "dropping the prefix index makes user_id-only lookups go through the bigger composite index"
+    - "primary keys and unique indexes are never dropped even if they duplicate another index"
+    - "phrased as a recommendation, not an order"
+  required_diagnosis: ["duplicate_index", "prefix_index", "partial_index_not_duplicate"]
+  verifiable_with_hypopg: false
+  reference:
+    extra_indexes_size: {before: "109 MB", after: "74 MB"}
+    insert_100k_ms: {pk_only: 89, before: 372, after: 237}
+
+- id: "10"
+  case: cases/10_unused_index.md
+  setup: setup/10_up.sql
+  teardown: setup/10_down.sql
+  workload:                                   # 5 times each, then wait ~2 s for the statistics
+    - cases/01_composite_order.sql
+    - cases/06_join_no_index.sql
+  answer_type: drop_index_with_caveats
+  acceptable:
+    - "orders_total_idx is a candidate for DROP, with caveats"
+  best:
+    - "orders_total_idx is a candidate for DROP, with caveats"
+  unacceptable:
+    - "DROP INDEX orders_total_idx without caveats"
+    - "DROP any primary key with idx_scan = 0"  # users_pkey, events_pkey, order_items_pkey
+    - "DROP INDEX orders_user_id_idx"
+  must_keep: ["users_pkey", "events_pkey", "order_items_pkey", "orders_pkey", "orders_user_id_idx"]
+  required_caveats:
+    - "statistics period is short (pg_stat_database.stats_reset seconds ago)"
+    - "periodic jobs (monthly reports) may need the index"
+    - "replicas keep their own usage statistics"
+    - "primary keys / unique indexes are excluded regardless of idx_scan"
+  required_diagnosis: ["unused_index"]
+  # Trap: orders_pkey shows idx_scan = 10 although no query reads by orders.id
+  # (the planner probes it for the join estimate). idx_scan > 0 is not proof of use either.
+  verifiable_with_hypopg: false
+  reference:
+    candidate: {name: orders_total_idx, idx_scan: 0, size: "43 MB"}
+
+- id: "11"
+  case: cases/11_seqscan_is_fine.sql
+  answer_type: no_action
+  acceptable:
+    - "no action: Seq Scan is the right plan for ~50% of the table"
+  best:
+    - "no action: Seq Scan is the right plan for ~50% of the table"
+  unacceptable:
+    - "orders (created_at)"                   # planner does not use it (same cost 53511), 43 MB + write cost
+  false_positive_if: ["create_index"]
+  required_diagnosis: ["large_share_of_rows", "random_heap_order"]
+  verifiable_with_hypopg: true                # hypothetical index is not chosen: verdict "no improvement"
+  reference:
+    before: {buffers: 18511, ms: 209}
+    with_index: {plan: "Seq Scan (unchanged)", ms: 211}
+
+- id: "12"
+  case: cases/12_sort_spill.sql
+  answer_type: work_mem
+  acceptable:
+    - "SET work_mem for the session / SET LOCAL for the query"
+    - "ALTER ROLE <reporting_role> SET work_mem"
+    - "avoid the full sort (LIMIT / pagination)"
+  best:
+    - "SET LOCAL work_mem for this query, after checking that the plan shape does not get worse"
+  unacceptable:
+    - "raise work_mem globally (ALTER SYSTEM / postgresql.conf)"   # per node, per process, per connection
+    - "orders (total)"                        # the planner picks it and the query becomes ~2x slower
+  required_caveats:
+    - "work_mem is allocated per sort/hash node and per process, not per server"
+    - "a bigger work_mem can change the plan (here: parallel -> serial, 0.50 s -> 0.69 s)"
+  required_diagnosis: ["sort_spill"]
+  verifiable_with_hypopg: false
+  reference:
+    before: {sort_method: "external merge", temp_written_pages: 8103, ms: 500}
+    after_work_mem_128MB: {sort_method: "quicksort", memory: "124 MB", ms: 690, plan: "serial"}
+    with_index_total: {plan: "Index Scan", ms: 1025}
