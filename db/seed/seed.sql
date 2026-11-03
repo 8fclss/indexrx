@@ -2,6 +2,11 @@
 
 TRUNCATE users, orders, order_items, events;
 
+-- Fixed seed: random() below gives the same data on every run.
+-- Dates are still relative to now() and ANALYZE samples rows with its own
+-- generator, so estimates (rows=) can differ slightly between runs
+SELECT setseed(0.42);
+
 -- Users: 200 000
 INSERT INTO users (id, email, country, city, created_at)
 SELECT
