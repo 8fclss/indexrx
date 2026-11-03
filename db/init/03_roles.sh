@@ -6,6 +6,7 @@ psql -v ON_ERROR_STOP=1 \
      -v agent_password="$AGENT_PASSWORD" \
      -v db="$POSTGRES_DB" <<'EOSQL'
 
+SET pg_stat_statements.track_utility = off;
 CREATE ROLE indexrx_agent
     LOGIN PASSWORD :'agent_password'
     NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
@@ -24,5 +25,8 @@ GRANT USAGE ON SCHEMA public TO indexrx_agent;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO indexrx_agent;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO indexrx_agent;
 GRANT pg_read_all_stats TO indexrx_agent;
+
+REVOKE CONNECT, TEMP ON DATABASE postgres FROM PUBLIC;
+REVOKE TEMP ON DATABASE template1 FROM PUBLIC;
 
 EOSQL
