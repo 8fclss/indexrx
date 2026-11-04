@@ -88,7 +88,7 @@ Some cases are traps for an agent that always proposes an index: in 08 the fix i
 
 The agent connects as `indexrx_agent` (`db/init/03_roles.sh`): `SELECT` only, `default_transaction_read_only`, statement, lock and idle-transaction timeouts, a connection limit, no access to other databases.
 
-`docs/security.md` records 38 attempts to break it (writes and DDL, bypassing read-only, timeouts, locks, files, other sessions, query texts) with the prediction, the result and what stopped it. The main conclusions:
+`docs/agent-role-security.md` records 38 attempts to break it (writes and DDL, bypassing read-only, timeouts, locks, files, other sessions, query texts) with the prediction, the result and what stopped it. The main conclusions:
 
 - The grants guarantee that the agent cannot change data or schema, read server files or escalate privileges. `read_only` alone is not a barrier: the role can turn it off.
 - Session settings (timeouts, `work_mem`) and its own role defaults can be changed by the agent, and several statements in one simple-protocol message escape the server's transaction. The server must open every transaction itself (`BEGIN READ ONLY`, `SET LOCAL` limits, one parsed statement, `ROLLBACK`).
