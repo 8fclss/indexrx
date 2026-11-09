@@ -2,7 +2,7 @@
 
 An AI agent that diagnoses slow PostgreSQL queries and proposes fixes backed by measurements, not guesses: an index when an index helps, `ANALYZE` when statistics are stale, extended statistics for correlated columns, dropping redundant indexes, or "do nothing" when the plan is already right.
 
-The agent will work through an MCP server written in Go (`EXPLAIN`, schema, statistics, hypothetical indexes via HypoPG) under a read-only database role. This repository currently contains the groundwork: a reproducible PostgreSQL test stand, a hand-measured eval set of 12 cases with reference answers and a security review of the agent role.
+The agent will work through an MCP server written in Go (`EXPLAIN`, schema, statistics, hypothetical indexes via HypoPG) under a read-only database role. This repository currently contains the groundwork (a reproducible PostgreSQL test stand, a hand-measured eval set of 12 cases with reference answers and a security review of the agent role) and the first version of the MCP server.
 
 ## Status
 
@@ -11,12 +11,12 @@ The agent will work through an MCP server written in Go (`EXPLAIN`, schema, stat
 | 1 | PostgreSQL 17 in Docker with HypoPG, `pg_stat_statements`, `pg_trgm`; skewed, reproducible seed data | done |
 | 2 | Eval set: 12 slow-query cases measured by hand with `EXPLAIN (ANALYZE, BUFFERS)`, reference answers in `eval/expected.yml` | done |
 | 3 | Read-only agent role and 38 attempts to break it, requirements for the server | done |
-| 4 | MCP server in Go (`list_tables`, `get_schema`, `list_indexes`, `explain`, `explain_analyze`, `hypothetical_index`) | next |
+| 4 | MCP server in Go: stdio transport, read-only transaction helper, `list_tables`. Next: `get_schema`, `list_indexes`, `explain`, `explain_analyze`, `hypothetical_index` | in progress |
 | 5 | Agent in Python, run against the eval set | planned |
 
 ## Quick start
 
-Requirements: Docker with Compose, and a bash shell for the scripts (Linux, macOS, WSL or Git Bash).
+Requirements: Docker with Compose, a bash shell for the scripts (Linux, macOS, WSL or Git Bash), Go 1.25+ for the MCP server, Node.js for MCP Inspector.
 
 ```bash
 cp .env.example .env              # set the passwords
@@ -84,6 +84,60 @@ Each case is a query (or a task) with a known correct answer type. Measured on t
 
 Some cases are traps for an agent that always proposes an index: in 08 the fix is `ANALYZE`, in 11 nothing, in 12 an index on `total` is chosen by the planner and makes the query twice as slow.
 
+## MCP server
+
+`cmd/indexrx-mcp` is an MCP server over stdio, built with the official [Go SDK](https://github.com/modelcontextprotocol/go-sdk) and [pgx](https://github.com/jackc/pgx). It connects as `indexrx_agent` and follows the requirements from the security review:
+
+- every tool call runs in its own `BEGIN READ ONLY` transaction with `SET LOCAL statement_timeout = '5s'` and `lock_timeout = '1s'` set by the server and the transaction is always rolled back (`internal/db/readonly.go`);
+- tools are fixed SQL with bind parameters, the agent never sends SQL text;
+- the pool is capped at 4 connections, one below the role's `CONNECTION LIMIT 5`;
+- stdout is the protocol channel, logs go to stderr;
+
+Tools so far:
+
+| Tool | Input | Output |
+|------|-------|--------|
+| `list_tables` | `schema` (default `public`) | tables the role can read, with estimated row count and total size including indexes |
+
+### Configuration
+
+One environment variable, also present in `.env.example`:
+
+```bash
+INDEXRX_DATABASE_URL=postgres://indexrx_agent:<AGENT_PASSWORD>@127.0.0.1:5432/indexrx?sslmode=disable
+```
+
+### Build
+
+```bash
+go build -o bin/indexrx-mcp ./cmd/indexrx-mcp                                    # Linux, macOS, WSL
+GOOS=windows GOARCH=amd64 go build -o bin/indexrx-mcp.exe ./cmd/indexrx-mcp      # Windows binary, from any OS
+```
+
+### Try it with MCP Inspector
+
+Web UI (opens a browser; switch the `indexrx-mcp` server on, then open Tools and call `list_tables`):
+
+```bash
+set -a; source .env; set +a
+npx @modelcontextprotocol/inspector -e INDEXRX_DATABASE_URL="$INDEXRX_DATABASE_URL" ./bin/indexrx-mcp
+```
+
+PowerShell:
+
+```powershell
+npx @modelcontextprotocol/inspector -e INDEXRX_DATABASE_URL="postgres://indexrx_agent:<AGENT_PASSWORD>@127.0.0.1:5432/indexrx?sslmode=disable" .\bin\indexrx-mcp.exe
+```
+
+CLI mode, without a browser:
+
+```bash
+npx @modelcontextprotocol/inspector --cli -e INDEXRX_DATABASE_URL="$INDEXRX_DATABASE_URL" ./bin/indexrx-mcp --method tools/list
+npx @modelcontextprotocol/inspector --cli -e INDEXRX_DATABASE_URL="$INDEXRX_DATABASE_URL" ./bin/indexrx-mcp --method tools/call --tool-name list_tables
+```
+
+If the web UI loads but connecting to the server times out after 30 s while the CLI mode works, make sure nothing between the browser and `127.0.0.1` is interfering. If the browser opens a tab without a fresh token, start with `MCP_AUTO_OPEN_ENABLED=false` and open the URL printed in the terminal.
+
 ## Agent role and security
 
 The agent connects as `indexrx_agent` (`db/init/03_roles.sh`): `SELECT` only, `default_transaction_read_only`, statement, lock and idle-transaction timeouts, a connection limit, no access to other databases.
@@ -97,10 +151,14 @@ The agent connects as `indexrx_agent` (`db/init/03_roles.sh`): `SELECT` only, `d
 ## Repository layout
 
 ```
-db/init/        extensions, schema, agent role (run on first start of an empty volume)
-db/seed/        data generation
-docker/         PostgreSQL 17 image with HypoPG
-eval/           cases, set-up scripts, results, reference answers
-docs/           security review of the agent role
-scripts/        seed, explain, ad-hoc SQL, security probe
+cmd/indexrx-mcp/   MCP server entry point
+internal/config/   configuration from the environment
+internal/db/       connection pool and the read-only transaction helper
+internal/tools/    MCP tools
+db/init/           extensions, schema, agent role (run on first start of an empty volume)
+db/seed/           data generation
+docker/            PostgreSQL 17 image with HypoPG
+eval/              cases, set-up scripts, results, reference answers
+docs/              security review of the agent role
+scripts/           seed, explain, ad-hoc SQL
 ```
