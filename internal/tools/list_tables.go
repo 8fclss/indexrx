@@ -41,10 +41,7 @@ type handlers struct {
 }
 
 func (h *handlers) listTables(ctx context.Context, _ *mcp.CallToolRequest, in ListTablesInput) (*mcp.CallToolResult, ListTablesOutput, error) {
-	schema := in.Schema
-	if schema == "" {
-		schema = "public"
-	}
+	schema := schemaOrDefault(in.Schema)
 
 	var tables []TableInfo
 	err := db.ReadOnly(ctx, h.pool, func(tx pgx.Tx) error {
