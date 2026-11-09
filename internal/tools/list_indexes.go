@@ -27,7 +27,7 @@ JOIN pg_class t ON t.oid = ix.indrelid
 JOIN pg_namespace n ON n.oid = t.relnamespace
 LEFT JOIN pg_stat_user_indexes s ON s.indexrelid = i.oid
 WHERE n.nspname = $1
-  AND ($2::text IS NULL OR t.relname = $2)
+  AND ($2::oid IS NULL OR t.oid = $2)
   AND has_table_privilege(t.oid, 'SELECT')
 ORDER BY t.relname, i.relname`
 
@@ -62,16 +62,24 @@ func (h *handlers) listIndexes(ctx context.Context, _ *mcp.CallToolRequest, in L
 	schema := schemaOrDefault(in.Schema)
 	out := ListIndexesOutput{Schema: schema}
 
-	var table *string
-	if in.Table != "" {
-		table = &in.Table
-	}
-
 	err := db.ReadOnly(ctx, h.pool, func(tx pgx.Tx) error {
+		if err := checkSchema(ctx, tx, schema); err != nil {
+			return err
+		}
+
+		var tableOID *uint32
+		if in.Table != "" {
+			oid, err := findTable(ctx, tx, schema, in.Table)
+			if err != nil {
+				return err
+			}
+			tableOID = &oid
+		}
+
 		if err := tx.QueryRow(ctx, statsSinceSQL).Scan(&out.StatsSince); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, listIndexesSQL, schema, table)
+		rows, err := tx.Query(ctx, listIndexesSQL, schema, tableOID)
 		if err != nil {
 			return err
 		}

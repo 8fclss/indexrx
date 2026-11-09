@@ -2,23 +2,12 @@ package tools
 
 import (
 	"context"
-	"errors"
-	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/8fclss/indexrx/internal/db"
 )
-
-const findTableSQL = `
-SELECT c.oid
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = $1
-  AND c.relname = $2
-  AND c.relkind IN ('r', 'p')
-  AND has_table_privilege(c.oid, 'SELECT')`
 
 const columnsSQL = `
 SELECT a.attname,
@@ -77,11 +66,8 @@ func (h *handlers) getSchema(ctx context.Context, _ *mcp.CallToolRequest, in Get
 	out := GetSchemaOutput{Schema: schema, Table: in.Table}
 
 	err := db.ReadOnly(ctx, h.pool, func(tx pgx.Tx) error {
-		var oid uint32
-		if err := tx.QueryRow(ctx, findTableSQL, schema, in.Table).Scan(&oid); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("table %s.%s not found or not readable", schema, in.Table)
-			}
+		oid, err := findTable(ctx, tx, schema, in.Table)
+		if err != nil {
 			return err
 		}
 

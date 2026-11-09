@@ -45,6 +45,10 @@ func (h *handlers) listTables(ctx context.Context, _ *mcp.CallToolRequest, in Li
 
 	var tables []TableInfo
 	err := db.ReadOnly(ctx, h.pool, func(tx pgx.Tx) error {
+		if err := checkSchema(ctx, tx, schema); err != nil {
+			return err
+		}
+
 		rows, err := tx.Query(ctx, listTablesSQL, schema)
 		if err != nil {
 			return err
