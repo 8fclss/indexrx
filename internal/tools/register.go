@@ -13,4 +13,10 @@ func Register(s *mcp.Server, pool *pgxpool.Pool) {
 		Description: "List tables in a schema with estimated row counts and total size. Call it first to see what the database contains.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, h.listTables)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_schema",
+		Description: "Get columns (with types, nullability, defaults) and constraints of one table. Call it before reasoning about indexes or rewriting a query on that table.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, h.getSchema)
 }
