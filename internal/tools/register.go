@@ -25,4 +25,10 @@ func Register(s *mcp.Server, pool *pgxpool.Pool) {
 		Description: "List existing indexes with full definitions, size, constraint flags and usage statistics. Call it before proposing a new index, to avoid duplicates, and when looking for redundant or unused indexes.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, h.listIndexes)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "explain",
+		Description: "Show the estimated execution plan of a SELECT query (EXPLAIN without ANALYZE: the query is NOT executed, numbers are planner estimates). Use it to see which scans and joins the planner chooses and how many rows it expects.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, h.explain)
 }
