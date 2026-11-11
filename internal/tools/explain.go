@@ -23,9 +23,9 @@ type ExplainInput struct {
 }
 
 type ExplainOutput struct {
-	TotalCost float64 `json:"total_cost" jsonschema:"planner cost estimate in abstract units, not milliseconds"`
-	PlanRows  float64 `json:"plan_rows" jsonschema:"estimated number of rows the query returns"`
-	Plan      any     `json:"plan" jsonschema:"plan tree from EXPLAIN (FORMAT JSON); estimates only, the query was not executed"`
+	TotalCost float64        `json:"total_cost" jsonschema:"planner cost estimate in abstract units, not milliseconds"`
+	PlanRows  float64        `json:"plan_rows" jsonschema:"estimated number of rows the query returns"`
+	Plan      map[string]any `json:"plan" jsonschema:"plan tree from EXPLAIN (FORMAT JSON); estimates only, the query was not executed"`
 }
 
 func (h *handlers) explain(ctx context.Context, _ *mcp.CallToolRequest, in ExplainInput) (*mcp.CallToolResult, ExplainOutput, error) {
