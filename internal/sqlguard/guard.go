@@ -45,6 +45,19 @@ var deniedPrefixes = []string{
 	"pg_stat_statements_reset",
 }
 
+// ErrUnsupportedMethod marks index types HypoPG cannot simulate
+var ErrUnsupportedMethod = errors.New("index access method is not supported by HypoPG")
+
+var hypoMethods = map[string]bool{"btree": true, "hash": true, "brin": true, "bloom": true}
+
+// IndexDef describes a validated CREATE INDEX statement
+type IndexDef struct {
+	Schema         string
+	Table          string
+	Method         string
+	HasExpressions bool
+}
+
 // CheckSelect accepts exactly one read-only SELECT (WITH ... SELECT allowed)
 func CheckSelect(sql string) error {
 	if len(sql) > MaxQueryBytes {
@@ -152,4 +165,48 @@ func walk(m protoreflect.Message, visit func(protoreflect.Message) error) error 
 		return err == nil
 	})
 	return err
+}
+
+// CheckCreateIndex accepts exactly one CREATE INDEX on a plain table,
+// with no denied functions in expressions or the WHERE predicate
+func CheckCreateIndex(sql string) (IndexDef, error) {
+	if len(sql) > MaxQueryBytes {
+		return IndexDef{}, fmt.Errorf("index definition is too long: %d bytes", len(sql))
+	}
+	tree, err := pg_query.Parse(sql)
+	if err != nil {
+		return IndexDef{}, fmt.Errorf("parse index definition: %w", err)
+	}
+	if n := len(tree.GetStmts()); n != 1 {
+		return IndexDef{}, fmt.Errorf("expected exactly one CREATE INDEX, got %d statements", n)
+	}
+	idx := tree.GetStmts()[0].GetStmt().GetIndexStmt()
+	if idx == nil {
+		return IndexDef{}, errors.New("expected a CREATE INDEX statement")
+	}
+
+	def := IndexDef{
+		Schema: idx.GetRelation().GetSchemaname(),
+		Table:  idx.GetRelation().GetRelname(),
+		Method: idx.GetAccessMethod(),
+	}
+	if def.Schema == "" {
+		def.Schema = "public"
+	}
+	if def.Method == "" {
+		def.Method = "btree"
+	}
+	for _, p := range idx.GetIndexParams() {
+		if p.GetIndexElem().GetExpr() != nil {
+			def.HasExpressions = true
+		}
+	}
+
+	if err := walk(idx.ProtoReflect(), checkNode); err != nil {
+		return IndexDef{}, err
+	}
+	if !hypoMethods[def.Method] {
+		return def, fmt.Errorf("%w: %s", ErrUnsupportedMethod, def.Method)
+	}
+	return def, nil
 }

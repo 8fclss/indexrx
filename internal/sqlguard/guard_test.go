@@ -1,6 +1,9 @@
 package sqlguard
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestCheckSelect(t *testing.T) {
 	tests := []struct {
@@ -70,6 +73,38 @@ func TestCheckExplain(t *testing.T) {
 			err := CheckExplain(tt.sql)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("CheckExplain(%q) error = %v, wantErr %v", tt.sql, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCheckCreateIndex(t *testing.T) {
+	tests := []struct {
+		name        string
+		sql         string
+		wantErr     bool
+		unsupported bool
+	}{
+		{"btree", "CREATE INDEX ON orders (user_id, created_at DESC)", false, false},
+		{"partial with include", "CREATE INDEX ON orders (id) INCLUDE (user_id, total) WHERE status = 'pending'", false, false},
+		{"expression", "CREATE INDEX ON users (lower(email))", false, false},
+		{"hash", "CREATE INDEX ON users USING hash (email)", false, false},
+		{"gin", "CREATE INDEX ON events USING gin (payload)", true, true},
+		{"gist trigram", "CREATE INDEX ON users USING gist (email gist_trgm_ops)", true, true},
+		{"drop index", "DROP INDEX orders_pkey", true, false},
+		{"two statements", "CREATE INDEX ON orders (total); CREATE INDEX ON orders (status)", true, false},
+		{"select", "SELECT 1", true, false},
+		{"denied function in expression", "CREATE INDEX ON orders ((set_config('a', 'b', false)))", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := CheckCreateIndex(tt.sql)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got := errors.Is(err, ErrUnsupportedMethod); got != tt.unsupported {
+				t.Fatalf("unsupported = %v, want %v (err %v)", got, tt.unsupported, err)
 			}
 		})
 	}

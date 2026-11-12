@@ -33,37 +33,49 @@ func (h *handlers) explain(ctx context.Context, _ *mcp.CallToolRequest, in Expla
 		return nil, ExplainOutput{}, fmt.Errorf("query rejected: %w", err)
 	}
 
-	query := strings.TrimRight(in.Query, "; \t\r\n")
-	stmt := "EXPLAIN (FORMAT JSON, SETTINGS) " + query
-
-	// Second check on the exact text that goes to the server
-	if err := sqlguard.CheckExplain(stmt); err != nil {
-		return nil, ExplainOutput{}, fmt.Errorf("internal check failed: %w", err)
-	}
-
-	var raw []byte
+	var res planResult
 	err := db.ReadOnly(ctx, h.pool, func(tx pgx.Tx) error {
-		// QueryExecModeExec: extended protocol (one statement only),
-		// no cached prepared statement for one-off agent queries.
-		return tx.QueryRow(ctx, stmt, pgx.QueryExecModeExec).Scan(&raw)
+		var err error
+		res, err = runExplain(ctx, tx, in.Query)
+		return err
 	})
 	if err != nil {
 		return nil, ExplainOutput{}, err
 	}
+	return nil, ExplainOutput{TotalCost: res.TotalCost, PlanRows: res.PlanRows, Plan: res.Full}, nil
+}
+
+type planResult struct {
+	TotalCost float64
+	PlanRows  float64
+	Root      map[string]any // plans[0]["Plan"]
+	Full      map[string]any // plans[0]
+}
+
+// runExplain explains a query that already passed sqlguard.CheckSelect
+func runExplain(ctx context.Context, tx pgx.Tx, query string) (planResult, error) {
+	stmt := "EXPLAIN (FORMAT JSON, SETTINGS) " + strings.TrimRight(query, "; \t\r\n")
+	if err := sqlguard.CheckExplain(stmt); err != nil {
+		return planResult{}, fmt.Errorf("internal check failed: %w", err)
+	}
+
+	var raw []byte
+	if err := tx.QueryRow(ctx, stmt, pgx.QueryExecModeExec).Scan(&raw); err != nil {
+		return planResult{}, err
+	}
 	if len(raw) > maxPlanBytes {
-		return nil, ExplainOutput{}, fmt.Errorf("plan is too large to return (%d KB); explain a smaller part of the query", len(raw)>>10)
+		return planResult{}, fmt.Errorf("plan is too large to return (%d KB); explain a smaller part of the query", len(raw)>>10)
 	}
 
 	var plans []map[string]any
 	if err := json.Unmarshal(raw, &plans); err != nil {
-		return nil, ExplainOutput{}, fmt.Errorf("decode plan: %w", err)
+		return planResult{}, fmt.Errorf("decode plan: %w", err)
 	}
 	if len(plans) == 0 {
-		return nil, ExplainOutput{}, errors.New("empty plan")
+		return planResult{}, errors.New("empty plan")
 	}
 	root, _ := plans[0]["Plan"].(map[string]any)
-	totalCost, _ := root["Total Cost"].(float64)
-	planRows, _ := root["Plan Rows"].(float64)
-
-	return nil, ExplainOutput{TotalCost: totalCost, PlanRows: planRows, Plan: plans[0]}, nil
+	cost, _ := root["Total Cost"].(float64)
+	rows, _ := root["Plan Rows"].(float64)
+	return planResult{TotalCost: cost, PlanRows: rows, Root: root, Full: plans[0]}, nil
 }

@@ -31,4 +31,10 @@ func Register(s *mcp.Server, pool *pgxpool.Pool) {
 		Description: "Show the estimated execution plan of a SELECT query (EXPLAIN without ANALYZE: the query is NOT executed, numbers are planner estimates). Use it to see which scans and joins the planner chooses and how many rows it expects.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, h.explain)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "hypothetical_index",
+		Description: "Estimate whether proposed indexes would help a SELECT without creating them (HypoPG). Compares planner cost before and after and reports whether the planner would use each index. Supports btree, hash and brin; GIN and GiST cannot be simulated. Results are planner estimates, not measured time. Check existing indexes with list_indexes first.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, h.hypotheticalIndex)
 }
