@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const defaultSchema = "public"
@@ -25,6 +26,11 @@ WHERE n.nspname = $1
   AND c.relkind IN ('r', 'p')
   AND has_schema_privilege(n.oid, 'USAGE')
   AND has_table_privilege(c.oid, 'SELECT')`
+
+type handlers struct {
+	pool        *pgxpool.Pool
+	analyzeSlot chan struct{}
+}
 
 func schemaOrDefault(s string) string {
 	if s == "" {

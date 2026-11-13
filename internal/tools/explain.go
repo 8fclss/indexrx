@@ -36,7 +36,7 @@ func (h *handlers) explain(ctx context.Context, _ *mcp.CallToolRequest, in Expla
 	var res planResult
 	err := db.ReadOnly(ctx, h.pool, func(tx pgx.Tx) error {
 		var err error
-		res, err = runExplain(ctx, tx, in.Query)
+		res, err = runExplain(ctx, tx, in.Query, false)
 		return err
 	})
 	if err != nil {
@@ -53,9 +53,13 @@ type planResult struct {
 }
 
 // runExplain explains a query that already passed sqlguard.CheckSelect
-func runExplain(ctx context.Context, tx pgx.Tx, query string) (planResult, error) {
-	stmt := "EXPLAIN (FORMAT JSON, SETTINGS) " + strings.TrimRight(query, "; \t\r\n")
-	if err := sqlguard.CheckExplain(stmt); err != nil {
+func runExplain(ctx context.Context, tx pgx.Tx, query string, analyze bool) (planResult, error) {
+	prefix, check := "EXPLAIN (FORMAT JSON, SETTINGS) ", sqlguard.CheckExplain
+	if analyze {
+		prefix, check = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, SETTINGS) ", sqlguard.CheckExplainAnalyze
+	}
+	stmt := prefix + strings.TrimRight(query, "; \t\r\n")
+	if err := check(stmt); err != nil {
 		return planResult{}, fmt.Errorf("internal check failed: %w", err)
 	}
 

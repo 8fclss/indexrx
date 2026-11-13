@@ -76,7 +76,7 @@ func (h *handlers) hypotheticalIndex(ctx context.Context, _ *mcp.CallToolRequest
 			}
 		}
 
-		before, err := runExplain(ctx, tx, in.Query)
+		before, err := runExplain(ctx, tx, in.Query, false)
 		if err != nil {
 			return fmt.Errorf("explain before: %w", err)
 		}
@@ -89,7 +89,7 @@ func (h *handlers) hypotheticalIndex(ctx context.Context, _ *mcp.CallToolRequest
 			out.Indexes = append(out.Indexes, r)
 		}
 
-		after, err := runExplain(ctx, tx, in.Query)
+		after, err := runExplain(ctx, tx, in.Query, false)
 		if err != nil {
 			return fmt.Errorf("explain after: %w", err)
 		}

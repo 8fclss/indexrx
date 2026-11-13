@@ -109,3 +109,24 @@ func TestCheckCreateIndex(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckExplainAnalyze(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		wantErr bool
+	}{
+		{"analyze select", "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT 1", false},
+		{"no analyze", "EXPLAIN (FORMAT JSON) SELECT 1", true},
+		{"analyze delete", "EXPLAIN (ANALYZE) DELETE FROM orders", true},
+		{"analyze with denied function", "EXPLAIN (ANALYZE) SELECT pg_sleep(10)", true},
+		{"analyze data-modifying cte", "EXPLAIN (ANALYZE) WITH d AS (DELETE FROM orders RETURNING *) SELECT * FROM d", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := CheckExplainAnalyze(tt.sql); (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

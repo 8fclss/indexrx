@@ -77,9 +77,13 @@ func CheckSelect(sql string) error {
 	return walk(stmt.ProtoReflect(), checkNode)
 }
 
-// CheckExplain verifies the final statement that is sent to the server:
-// exactly one EXPLAIN without ANALYZE around a query that passes the SELECT rules
-func CheckExplain(sql string) error {
+// CheckExplain: one EXPLAIN without ANALYZE around a safe SELECT.
+func CheckExplain(sql string) error { return checkExplain(sql, false) }
+
+// CheckExplainAnalyze: one EXPLAIN with ANALYZE around a safe SELECT.
+func CheckExplainAnalyze(sql string) error { return checkExplain(sql, true) }
+
+func checkExplain(sql string, wantAnalyze bool) error {
 	tree, err := pg_query.Parse(sql)
 	if err != nil {
 		return fmt.Errorf("parse explain: %w", err)
@@ -91,10 +95,14 @@ func CheckExplain(sql string) error {
 	if explain == nil {
 		return errors.New("expected an EXPLAIN statement")
 	}
+	hasAnalyze := false
 	for _, opt := range explain.GetOptions() {
 		if strings.EqualFold(opt.GetDefElem().GetDefname(), "analyze") {
-			return errors.New("EXPLAIN ANALYZE is not allowed here")
+			hasAnalyze = true
 		}
+	}
+	if hasAnalyze != wantAnalyze {
+		return fmt.Errorf("unexpected EXPLAIN mode: analyze=%v, want %v", hasAnalyze, wantAnalyze)
 	}
 	inner := explain.GetQuery()
 	if inner.GetSelectStmt() == nil {

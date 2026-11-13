@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/8fclss/indexrx/internal/db"
@@ -34,10 +33,6 @@ type TableInfo struct {
 type ListTablesOutput struct {
 	Schema string      `json:"schema"`
 	Tables []TableInfo `json:"tables"`
-}
-
-type handlers struct {
-	pool *pgxpool.Pool
 }
 
 func (h *handlers) listTables(ctx context.Context, _ *mcp.CallToolRequest, in ListTablesInput) (*mcp.CallToolResult, ListTablesOutput, error) {

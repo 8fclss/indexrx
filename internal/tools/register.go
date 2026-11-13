@@ -6,7 +6,7 @@ import (
 )
 
 func Register(s *mcp.Server, pool *pgxpool.Pool) {
-	h := &handlers{pool: pool}
+	h := &handlers{pool: pool, analyzeSlot: make(chan struct{}, 1)}
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_tables",
@@ -37,4 +37,10 @@ func Register(s *mcp.Server, pool *pgxpool.Pool) {
 		Description: "Estimate whether proposed indexes would help a SELECT without creating them (HypoPG). Compares planner cost before and after and reports whether the planner would use each index. Supports btree, hash and brin; GIN and GiST cannot be simulated. Results are planner estimates, not measured time. Check existing indexes with list_indexes first.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, h.hypotheticalIndex)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "explain_analyze",
+		Description: "EXECUTE a SELECT query and return the actual plan with real row counts, timing and buffer usage (EXPLAIN ANALYZE, BUFFERS). Use it only when estimates from explain are not enough: it costs real time and load. Queries with a high estimated cost are not executed; queries slower than 5 s are cancelled and reported as timeout. Hypothetical indexes are ignored by it.",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+	}, h.explainAnalyze)
 }
