@@ -2,21 +2,21 @@
 
 An AI agent that diagnoses slow PostgreSQL queries and proposes fixes backed by measurements, not guesses: an index when an index helps, `ANALYZE` when statistics are stale, extended statistics for correlated columns, dropping redundant indexes, or "do nothing" when the plan is already right.
 
-The agent will work through an MCP server written in Go (`EXPLAIN`, schema, statistics, hypothetical indexes via HypoPG) under a read-only database role. This repository currently contains the groundwork (a reproducible PostgreSQL test stand, a hand-measured eval set of 12 cases with reference answers and a security review of the agent role) and the first version of the MCP server.
+The agent will work through an MCP server written in Go (`EXPLAIN`, schema, statistics, hypothetical indexes via HypoPG) under a read-only database role. This repository currently contains the groundwork (a reproducible PostgreSQL test stand, a hand-measured [eval set](eval/) of 12 cases with reference answers and a [security review](docs/agent-role-security.md) of the agent role) and the MCP server with its six tools. The agent itself is the next stage.
 
 ## Status
 
 | Stage | What | State |
 |-------|------|-------|
 | 1 | PostgreSQL 17 in Docker with HypoPG, `pg_stat_statements`, `pg_trgm`; skewed, reproducible seed data | done |
-| 2 | Eval set: 12 slow-query cases measured by hand with `EXPLAIN (ANALYZE, BUFFERS)`, reference answers in `eval/expected.yml` | done |
-| 3 | Read-only agent role and 38 attempts to break it, requirements for the server | done |
-| 4 | MCP server in Go: stdio transport, read-only transaction helper, `list_tables`. Next: `get_schema`, `list_indexes`, `explain`, `explain_analyze`, `hypothetical_index` | in progress |
+| 2 | Eval set: 12 slow-query cases measured by hand with `EXPLAIN (ANALYZE, BUFFERS)`, reference answers in [`eval/expected.yml`](eval/expected.yml) | done |
+| 3 | Read-only agent role and 38 attempts to break it, requirements for the server ([`docs/agent-role-security.md`](docs/agent-role-security.md)) | done |
+| 4 | MCP server in Go: `list_tables`, `get_schema`, `list_indexes`, `explain`, `explain_analyze`, `hypothetical_index`; SQL checked on the PostgreSQL parse tree. Open: [security tasks](docs/agent-role-security.md#open-tasks), compact plan format, statistics tools | in progress |
 | 5 | Agent in Python, run against the eval set | planned |
 
 ## Quick start
 
-Requirements: Docker with Compose, a bash shell for the scripts (Linux, macOS, WSL or Git Bash), Go 1.25+ for the MCP server, Node.js for MCP Inspector.
+Requirements: Docker with Compose, a bash shell for the scripts (Linux, macOS, WSL or Git Bash), Go 1.25+ with cgo and a C compiler for the MCP server (the SQL parser [pg_query_go](https://github.com/pganalyze/pg_query_go) is a C library), Node.js for MCP Inspector.
 
 ```bash
 cp .env.example .env              # set the passwords
@@ -46,7 +46,7 @@ Only primary keys exist after seeding; every case creates and drops its own inde
 
 ## Measurement setup
 
-All measurements in `eval/` were taken on one machine:
+All measurements in [`eval/`](eval/) were taken on one machine:
 
 | | |
 |---|---|
@@ -77,27 +77,34 @@ Each case is a query (or a task) with a known correct answer type. Measured on t
 | 11 | Seq Scan is the right plan | `no_action` | an index is ignored by the planner; proposing one is a false positive |
 | 12 | Sort spills to disk | `work_mem` | in-memory sort needs ~124 MB, and the plan loses parallelism |
 
-- `eval/cases/` — the queries and task descriptions, `eval/setup/` — set-up and tear-down for cases 08–10.
-- `eval/results.md` — full measurements, rejected variants and what the hypotheses got wrong.
-- `eval/expected.yml` — machine-readable reference answers: acceptable, best, suboptimal and unacceptable solutions, required diagnosis and caveats, false-positive rules.
-- `eval/hypopg.md` — which of the solutions can be verified with hypothetical indexes (B-tree yes, GIN no) and how far HypoPG's costs and sizes are from real ones.
+- [`eval/cases/`](eval/cases/) — the queries and task descriptions, [`eval/setup/`](eval/setup/) — set-up and tear-down for cases 08–10.
+- [`eval/results.md`](eval/results.md) — full measurements, rejected variants and what the hypotheses got wrong.
+- [`eval/expected.yml`](eval/expected.yml) — machine-readable reference answers: acceptable, best, suboptimal and unacceptable solutions, required diagnosis and caveats, false-positive rules.
+- [`eval/hypopg.md`](eval/hypopg.md) — which of the solutions can be verified with hypothetical indexes (B-tree yes, GIN no) and how far HypoPG's costs and sizes are from real ones.
 
 Some cases are traps for an agent that always proposes an index: in 08 the fix is `ANALYZE`, in 11 nothing, in 12 an index on `total` is chosen by the planner and makes the query twice as slow.
 
 ## MCP server
 
-`cmd/indexrx-mcp` is an MCP server over stdio, built with the official [Go SDK](https://github.com/modelcontextprotocol/go-sdk) and [pgx](https://github.com/jackc/pgx). It connects as `indexrx_agent` and follows the requirements from the security review:
+`cmd/indexrx-mcp` is an MCP server over stdio, built with the official [Go SDK](https://github.com/modelcontextprotocol/go-sdk) and [pgx](https://github.com/jackc/pgx). It connects as `indexrx_agent` and implements the requirements of the [security review](docs/agent-role-security.md#implementation-status-of-the-server-requirements):
 
-- every tool call runs in its own `BEGIN READ ONLY` transaction with `SET LOCAL statement_timeout = '5s'` and `lock_timeout = '1s'` set by the server and the transaction is always rolled back (`internal/db/readonly.go`);
-- tools are fixed SQL with bind parameters, the agent never sends SQL text;
-- the pool is capped at 4 connections, one below the role's `CONNECTION LIMIT 5`;
-- stdout is the protocol channel, logs go to stderr;
+- every tool call runs in its own `BEGIN READ ONLY` transaction with `SET LOCAL statement_timeout = '5s'` and `lock_timeout = '1s'` set by the server, and the transaction is always rolled back ([`internal/db/readonly.go`](internal/db/readonly.go));
+- the catalog tools are fixed SQL with bind parameters; schema and table names are checked against the role's actual rights, so a missing table and a table the agent cannot read give the same error;
+- the only SQL the agent writes is the query being analyzed. [`internal/sqlguard`](internal/sqlguard/guard.go) parses it with the PostgreSQL parser and accepts exactly one `SELECT` without data-modifying CTEs, row locks, `SELECT INTO`, placeholders or functions with side effects (`set_config`, `pg_sleep`, advisory locks, `pg_terminate_backend`, `hypopg_*`, ...). The final `EXPLAIN` text is checked again before it is sent, over the extended protocol, so a second statement cannot slip through;
+- `explain_analyze` runs only below an estimated cost of 1,000,000, one call at a time, at most 3 runs of 5 s each; temporary files are capped by the role's `temp_file_limit`;
+- `hypothetical_index` works on a dedicated connection and calls `hypopg_reset()` after every call, also after errors;
+- the pool is capped at 4 connections, one below the role's `CONNECTION LIMIT 5`; stdout is the protocol channel, logs go to stderr.
 
-Tools so far:
+Tools:
 
-| Tool | Input | Output |
-|------|-------|--------|
+| Tool | Input | What it returns |
+|------|-------|-----------------|
 | `list_tables` | `schema` (default `public`) | tables the role can read, with estimated row count and total size including indexes |
+| `get_schema` | `table`, `schema` | columns with types, nullability and defaults, constraints |
+| `list_indexes` | `schema`, optional `table` | index definitions, size, unique / primary / valid flags, whether the index backs a constraint, scans and last scan, `stats_since` |
+| `explain` | `query` | estimated plan (`EXPLAIN (FORMAT JSON, SETTINGS)`), total cost and rows; the query is not executed |
+| `explain_analyze` | `query`, `runs` (1–3) | actual plan with timing and buffers per run, or `too_expensive` / `timeout` |
+| `hypothetical_index` | `query`, 1–5 `CREATE INDEX` statements | cost before and after, whether the planner uses each index, HypoPG size estimate; `unverifiable` for GIN / GiST |
 
 ### Configuration
 
@@ -110,23 +117,19 @@ INDEXRX_DATABASE_URL=postgres://indexrx_agent:<AGENT_PASSWORD>@127.0.0.1:5432/in
 ### Build
 
 ```bash
-go build -o bin/indexrx-mcp ./cmd/indexrx-mcp                                    # Linux, macOS, WSL
-GOOS=windows GOARCH=amd64 go build -o bin/indexrx-mcp.exe ./cmd/indexrx-mcp      # Windows binary, from any OS
+go build -o bin/indexrx-mcp ./cmd/indexrx-mcp
+go test ./...
 ```
+
+cgo has to be enabled (the default when a C compiler is installed), so a plain `GOOS=...` cross-build does not work without a C cross-compiler. On Windows, build and run the server inside WSL.
 
 ### Try it with MCP Inspector
 
-Web UI (opens a browser; switch the `indexrx-mcp` server on, then open Tools and call `list_tables`):
+Web UI (opens a browser; switch the `indexrx-mcp` server on, then open Tools):
 
 ```bash
 set -a; source .env; set +a
 npx @modelcontextprotocol/inspector -e INDEXRX_DATABASE_URL="$INDEXRX_DATABASE_URL" ./bin/indexrx-mcp
-```
-
-PowerShell:
-
-```powershell
-npx @modelcontextprotocol/inspector -e INDEXRX_DATABASE_URL="postgres://indexrx_agent:<AGENT_PASSWORD>@127.0.0.1:5432/indexrx?sslmode=disable" .\bin\indexrx-mcp.exe
 ```
 
 CLI mode, without a browser:
@@ -140,20 +143,23 @@ If the web UI loads but connecting to the server times out after 30 s while the 
 
 ## Agent role and security
 
-The agent connects as `indexrx_agent` (`db/init/03_roles.sh`): `SELECT` only, `default_transaction_read_only`, statement, lock and idle-transaction timeouts, a connection limit, no access to other databases.
+The agent connects as `indexrx_agent` ([`db/init/03_roles.sh`](db/init/03_roles.sh)): `SELECT` only, `default_transaction_read_only`, statement, lock and idle-transaction timeouts, `temp_file_limit`, a connection limit, no access to other databases.
 
-`docs/agent-role-security.md` records 38 attempts to break it (writes and DDL, bypassing read-only, timeouts, locks, files, other sessions, query texts) with the prediction, the result and what stopped it. The main conclusions:
+[`docs/agent-role-security.md`](docs/agent-role-security.md) records 38 attempts to break it (writes and DDL, bypassing read-only, timeouts, locks, files, other sessions, query texts) with the prediction, the result and what stopped it. The main conclusions:
 
 - The grants guarantee that the agent cannot change data or schema, read server files or escalate privileges. `read_only` alone is not a barrier: the role can turn it off.
 - Session settings (timeouts, `work_mem`) and its own role defaults can be changed by the agent, and several statements in one simple-protocol message escape the server's transaction. The server must open every transaction itself (`BEGIN READ ONLY`, `SET LOCAL` limits, one parsed statement, `ROLLBACK`).
 - The agent does not get a "run any SQL" tool. Tools are fixed queries with parameters; arbitrary SQL only appears in `EXPLAIN` of the analyzed query, and `EXPLAIN ANALYZE` is the one point that needs the full protection.
+
+The same document tracks [which requirements the server already meets](docs/agent-role-security.md#implementation-status-of-the-server-requirements) and the [open tasks](docs/agent-role-security.md#open-tasks).
 
 ## Repository layout
 
 ```
 cmd/indexrx-mcp/   MCP server entry point
 internal/config/   configuration from the environment
-internal/db/       connection pool and the read-only transaction helper
+internal/db/       connection pool, read-only transaction helpers
+internal/sqlguard/ validation of agent SQL on the PostgreSQL parse tree
 internal/tools/    MCP tools
 db/init/           extensions, schema, agent role (run on first start of an empty volume)
 db/seed/           data generation
