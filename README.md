@@ -1,3 +1,4 @@
+[![M8ven Score](https://m8ven.ai/badge/mcp/8fclss-indexrx-nn7ibj?v=3471df6347e3508bba40203481cb72ab)](https://m8ven.ai/mcp/8fclss-indexrx-nn7ibj?s=readme)
 # indexrx
 
 An AI agent that diagnoses slow PostgreSQL queries and proposes fixes backed by measurements, not guesses: an index when an index helps, `ANALYZE` when statistics are stale, extended statistics for correlated columns, dropping redundant indexes, or "do nothing" when the plan is already right.
